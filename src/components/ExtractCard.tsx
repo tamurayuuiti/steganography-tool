@@ -3,7 +3,6 @@ import {
   extract,
   formatExtractedSize,
   getPreviewKind,
-  type ExtractedFile,
 } from "../steganography";
 import { useImageSource } from "../hooks/useImageSource";
 import { useObjectUrls } from "../hooks/useObjectUrls";
@@ -13,12 +12,13 @@ import {
   loadImageDimensions,
   readBlobAsText,
 } from "../utils/imageFile";
+import type { ExtractedFile, PreviewClickHandler } from "../types";
 import FileDropZone from "./FileDropZone";
 import ProgressBar from "./ProgressBar";
 
 interface ExtractCardProps {
   /** プレビュー画像クリック時に拡大モーダルを開く */
-  onPreviewClick: (src: string) => void;
+  onPreviewClick: PreviewClickHandler;
 }
 
 /**

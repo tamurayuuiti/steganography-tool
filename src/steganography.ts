@@ -7,6 +7,8 @@
  * データ構造: [ファイル名長(16bit)][ファイル名][データ長(32bit)][データ本体]
  */
 
+import type { ExtractedFile, PreviewKind, ProgressCallback } from "./types";
+
 export const CONFIG = {
   /** UIフリーズを防ぐための処理単位（バイト数） */
   chunkSize: 50000,
@@ -15,9 +17,6 @@ export const CONFIG = {
   validImageTypes: ["image/png", "image/jpeg", "image/heif"],
   validImageExts: ["png", "jpg", "jpeg", "heif"],
 } as const;
-
-/** 進捗を 0-100 の範囲で通知するコールバック */
-export type ProgressCallback = (percent: number) => void;
 
 /**
  * 埋め込み可能な最大バイト数を計算する。
@@ -206,15 +205,6 @@ export function isValidImage(file: File): boolean {
 }
 
 /**
- * 抽出結果として復元されるファイル情報。
- */
-export interface ExtractedFile {
-  name: string;
-  extension: string;
-  blob: Blob;
-}
-
-/**
  * 抽出処理のチャンクサイズ（ピクセル単位、元の抽出ツール仕様に合わせる）。
  */
 const EXTRACT_CHUNK_SIZE = 1000;
@@ -302,9 +292,6 @@ export function formatExtractedSize(size: number): string {
   }
   return `${size} バイト`;
 }
-
-/** プレビュー可能な拡張子の種別 */
-export type PreviewKind = "image" | "audio" | "text" | "unsupported";
 
 /**
  * 拡張子からプレビュー種別を判定する。

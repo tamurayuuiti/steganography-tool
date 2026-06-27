@@ -10,19 +10,13 @@ import {
 import { useImageSource } from "../hooks/useImageSource";
 import { useProgress } from "../hooks/useProgress";
 import { useStopwatch } from "../hooks/useStopwatch";
+import type { PreviewClickHandler, TargetFileInfo } from "../types";
 import FileDropZone from "./FileDropZone";
 import ProgressBar from "./ProgressBar";
 
-/** 埋め込み対象ファイルの基本情報（表示用） */
-interface TargetFileInfo {
-  name: string;
-  size: number;
-  type: string;
-}
-
 interface EmbedCardProps {
   /** プレビュー画像クリック時に拡大モーダルを開く */
-  onPreviewClick: (src: string) => void;
+  onPreviewClick: PreviewClickHandler;
 }
 
 /**
