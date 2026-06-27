@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   calcMaxDataBytes,
   ensureCapacity,
@@ -7,7 +7,9 @@ import {
   formatBytes,
   isValidImage,
 } from "../steganography";
-import { INITIAL_PROGRESS, type ProgressState } from "../types";
+import { useImageSource } from "../hooks/useImageSource";
+import { useProgress } from "../hooks/useProgress";
+import { useStopwatch } from "../hooks/useStopwatch";
 import FileDropZone from "./FileDropZone";
 import ProgressBar from "./ProgressBar";
 
@@ -30,12 +32,24 @@ interface EmbedCardProps {
  */
 function EmbedCard({ onPreviewClick }: EmbedCardProps) {
   // --- 画像関連の状態 ---
-  const [imageFileName, setImageFileName] = useState<string>("");
   const [originalPreviewSrc, setOriginalPreviewSrc] = useState<string>("");
   const [maxDataBytes, setMaxDataBytes] = useState<number>(0);
-  // 埋め込み元画像の読み込みが完了しているか（imgDataRef.current の有無をレンダーで安全に判定するため）
-  const [isSourceImageLoaded, setIsSourceImageLoaded] =
-    useState<boolean>(false);
+
+  const {
+    fileName: imageFileName,
+    isLoaded: isSourceImageLoaded,
+    canvasRef,
+    imageDataRef: imgDataRef,
+    loadFile: loadSourceImage,
+  } = useImageSource({
+    validate: isValidImage,
+    validationErrorMessage:
+      "対応していない画像形式です。PNG, JPG, HEIFを使用してください。",
+    onLoaded: (dataUrl, imgData) => {
+      setOriginalPreviewSrc(dataUrl);
+      setMaxDataBytes(calcMaxDataBytes(imgData.width, imgData.height));
+    },
+  });
 
   // --- 埋め込み対象ファイルの状態 ---
   const [targetFile, setTargetFile] = useState<File | null>(null);
@@ -44,96 +58,33 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
   );
 
   // --- 進捗・結果の状態 ---
-  const [progress, setProgress] = useState<ProgressState>(INITIAL_PROGRESS);
+  const { progress, start, updatePercent, updateMessage, finish, stopRunning, reset } =
+    useProgress();
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [outputPreviewSrc, setOutputPreviewSrc] = useState<string>("");
-  const [elapsedTime, setElapsedTime] = useState<string>("0.00s");
+  const { elapsedTime, start: startStopwatch, stop: stopStopwatch } =
+    useStopwatch();
 
   // --- DOM操作が必須な箇所のみ ref で保持 ---
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // ImageData は巨大なピクセル配列を保持するため、再レンダリングの対象にせず ref で保持する
-  const imgDataRef = useRef<ImageData | null>(null);
   const originalFileNameRef = useRef<string>("");
-  // ストップウォッチ用
-  const startTimeRef = useRef<number>(0);
-  const animationFrameIdRef = useRef<number | null>(null);
-
-  // ストップウォッチ停止時にアニメーションフレームを確実に解放する
-  useEffect(() => {
-    return () => {
-      if (animationFrameIdRef.current !== null) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-      }
-    };
-  }, []);
-
-  const startStopwatch = useCallback(() => {
-    startTimeRef.current = Date.now();
-    const update = () => {
-      const diff = (Date.now() - startTimeRef.current) / 1000;
-      setElapsedTime(`${diff.toFixed(2)}s`);
-      animationFrameIdRef.current = requestAnimationFrame(update);
-    };
-    update();
-  }, []);
-
-  const stopStopwatch = useCallback(() => {
-    if (animationFrameIdRef.current !== null) {
-      cancelAnimationFrame(animationFrameIdRef.current);
-      animationFrameIdRef.current = null;
-    }
-  }, []);
 
   // 新しい入力があった際に前回の処理結果・エラー表示をリセットする
   const resetResults = useCallback(() => {
     setOutputPreviewSrc("");
     setErrorMessage("");
-    setProgress(INITIAL_PROGRESS);
-  }, []);
+    reset();
+  }, [reset]);
 
   // --- 画像アップロード処理 ---
   const handleImageUpload = useCallback(
     (file: File) => {
-      if (!isValidImage(file)) {
-        alert("対応していない画像形式です。PNG, JPG, HEIFを使用してください。");
-        return;
-      }
-
       resetResults();
-      setIsSourceImageLoaded(false);
       originalFileNameRef.current = file.name;
-      setImageFileName(`選択中: ${file.name}`);
-
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result;
-        if (typeof result !== "string") return;
-
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          if (!canvas) return;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) return;
-
-          canvas.width = img.width;
-          canvas.height = img.height;
-          ctx.drawImage(img, 0, 0);
-
-          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          imgDataRef.current = imgData;
-
-          setOriginalPreviewSrc(result);
-          setMaxDataBytes(calcMaxDataBytes(imgData.width, imgData.height));
-          setIsSourceImageLoaded(true);
-        };
-        img.src = result;
-      };
-      reader.readAsDataURL(file);
+      void loadSourceImage(file);
     },
-    [resetResults],
+    [resetResults, loadSourceImage],
   );
 
   // --- 埋め込み対象ファイルのアップロード処理 ---
@@ -152,12 +103,7 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
     const imgData = imgDataRef.current;
     if (!imgData || !targetFile) return;
 
-    setProgress({
-      visible: true,
-      message: "データ埋め込み中...",
-      percent: 0,
-      isRunning: true,
-    });
+    start("データ埋め込み中...");
     setErrorMessage("");
     startStopwatch();
 
@@ -178,24 +124,15 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
       );
 
       // 3. 埋め込み処理 (Chunking for UI responsiveness)
-      await embed(imgData.data, fileNameBytes, fileBytes, (percent) => {
-        setProgress((prev) => ({ ...prev, percent }));
-      });
+      await embed(imgData.data, fileNameBytes, fileBytes, updatePercent);
 
       // 4. 検証 (埋め込んだデータを読み出して比較)
-      setProgress((prev) => ({ ...prev, message: "データ検証中..." }));
-      await verify(imgData.data, fileNameBytes, fileBytes, (percent) => {
-        setProgress((prev) => ({ ...prev, percent }));
-      });
+      updateMessage("データ検証中...");
+      await verify(imgData.data, fileNameBytes, fileBytes, updatePercent);
 
       // 5. 完了処理
       stopStopwatch();
-      setProgress((prev) => ({
-        ...prev,
-        percent: 100,
-        message: "完了",
-        isRunning: false,
-      }));
+      finish("完了");
 
       // 結果をCanvasに反映してプレビュー表示
       const canvas = canvasRef.current;
@@ -208,10 +145,21 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
       stopStopwatch();
       const message = err instanceof Error ? err.message : String(err);
       setErrorMessage(message);
-      setProgress((prev) => ({ ...prev, isRunning: false }));
+      stopRunning();
       console.error(err);
     }
-  }, [targetFile, startStopwatch, stopStopwatch]);
+  }, [
+    targetFile,
+    imgDataRef,
+    canvasRef,
+    start,
+    updatePercent,
+    updateMessage,
+    finish,
+    stopRunning,
+    startStopwatch,
+    stopStopwatch,
+  ]);
 
   // --- ダウンロード処理 ---
   const downloadImage = useCallback(() => {

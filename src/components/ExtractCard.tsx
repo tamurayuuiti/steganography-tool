@@ -5,7 +5,14 @@ import {
   getPreviewKind,
   type ExtractedFile,
 } from "../steganography";
-import { INITIAL_PROGRESS, type ProgressState } from "../types";
+import { useImageSource } from "../hooks/useImageSource";
+import { useObjectUrls } from "../hooks/useObjectUrls";
+import { useProgress } from "../hooks/useProgress";
+import {
+  formatImageDimensions,
+  loadImageDimensions,
+  readBlobAsText,
+} from "../utils/imageFile";
 import FileDropZone from "./FileDropZone";
 import ProgressBar from "./ProgressBar";
 
@@ -20,11 +27,17 @@ interface ExtractCardProps {
  * 結果プレビュー（画像/音声/テキスト）・ダウンロードまでの責務を持つ。
  */
 function ExtractCard({ onPreviewClick }: ExtractCardProps) {
+  const {
+    fileName: extractImageName,
+    isLoaded: isExtractReady,
+    canvasRef: extractCanvasRef,
+    imageDataRef: extractImgDataRef,
+    loadFile: loadExtractImage,
+  } = useImageSource();
+
   // --- 抽出関連の状態 ---
-  const [extractImageName, setExtractImageName] = useState<string>("");
-  const [isExtractReady, setIsExtractReady] = useState<boolean>(false);
-  const [extractProgress, setExtractProgress] =
-    useState<ProgressState>(INITIAL_PROGRESS);
+  const { progress: extractProgress, start, update, stopRunning, reset } =
+    useProgress();
   const [extractError, setExtractError] = useState<string>("");
   const [extractedFile, setExtractedFile] = useState<ExtractedFile | null>(
     null,
@@ -36,62 +49,27 @@ function ExtractCard({ onPreviewClick }: ExtractCardProps) {
   // テキスト系ファイルのプレビュー内容
   const [extractedTextPreview, setExtractedTextPreview] = useState<string>("");
 
-  // --- 抽出機能用 ref ---
-  const extractCanvasRef = useRef<HTMLCanvasElement>(null);
   const extractImageInputRef = useRef<HTMLInputElement>(null);
-  const extractImgDataRef = useRef<ImageData | null>(null);
-  // createObjectURL で生成したURLはコンポーネントのライフサイクルを越えて残るため ref で管理し、明示的に解放する
-  const extractedObjectUrlsRef = useRef<string[]>([]);
+  const { createUrl, revokeAll } = useObjectUrls();
 
   // --- 抽出: 結果のリセット ---
   const resetExtractResults = useCallback(() => {
-    setExtractProgress(INITIAL_PROGRESS);
+    reset();
     setExtractError("");
     setExtractedFile(null);
     setExtractedImageDimensions("");
     setExtractedPreviewUrl("");
     setExtractedTextPreview("");
-    extractedObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    extractedObjectUrlsRef.current = [];
-  }, []);
+    revokeAll();
+  }, [reset, revokeAll]);
 
   // --- 抽出: 画像アップロード処理 ---
   const handleExtractImageUpload = useCallback(
     (file: File) => {
       resetExtractResults();
-      extractImgDataRef.current = null;
-      setIsExtractReady(false);
-      setExtractImageName(`選択中: ${file.name}`);
-
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result;
-        if (typeof result !== "string") return;
-
-        const img = new Image();
-        img.onload = () => {
-          const canvas = extractCanvasRef.current;
-          if (!canvas) return;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) return;
-
-          canvas.width = img.width;
-          canvas.height = img.height;
-          ctx.drawImage(img, 0, 0);
-
-          extractImgDataRef.current = ctx.getImageData(
-            0,
-            0,
-            canvas.width,
-            canvas.height,
-          );
-          setIsExtractReady(true);
-        };
-        img.src = result;
-      };
-      reader.readAsDataURL(file);
+      void loadExtractImage(file);
     },
-    [resetExtractResults],
+    [resetExtractResults, loadExtractImage],
   );
 
   // --- 抽出: 実行処理 ---
@@ -102,72 +80,52 @@ function ExtractCard({ onPreviewClick }: ExtractCardProps) {
       return;
     }
 
-    setExtractProgress({
-      visible: true,
-      message: "データ抽出中",
-      percent: 0,
-      isRunning: true,
-    });
+    start("データ抽出中");
     setExtractError("");
 
     try {
       const result = await extract(imgData.data, (percent) => {
-        setExtractProgress((prev) => ({
-          ...prev,
+        update({
           percent,
           message: percent === 100 ? "データ抽出完了" : "データ抽出中",
-        }));
+        });
       });
 
       setExtractedFile(result);
-      setExtractProgress((prev) => ({ ...prev, isRunning: false }));
+      stopRunning();
 
       // 抽出結果の形式に応じたプレビュー（画像/音声URL・テキスト内容・画像寸法）を生成する
       const kind = getPreviewKind(result.extension);
 
       if (kind === "image" || kind === "audio") {
-        const objectUrl = URL.createObjectURL(result.blob);
-        extractedObjectUrlsRef.current.push(objectUrl);
+        const objectUrl = createUrl(result.blob);
         setExtractedPreviewUrl(objectUrl);
 
         if (kind === "image") {
-          const img = new Image();
-          img.onload = () => {
-            const megaPixels = ((img.width * img.height) / 1_000_000).toFixed(
-              2,
-            );
-            setExtractedImageDimensions(
-              `${img.width}x${img.height} ピクセル (${megaPixels} MP)`,
-            );
-          };
-          img.src = objectUrl;
+          const { width, height } = await loadImageDimensions(objectUrl);
+          setExtractedImageDimensions(formatImageDimensions(width, height));
         }
       } else if (kind === "text") {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const text = e.target?.result;
-          if (typeof text === "string") setExtractedTextPreview(text);
-        };
-        reader.readAsText(result.blob);
+        const text = await readBlobAsText(result.blob);
+        setExtractedTextPreview(text);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setExtractError(message);
-      setExtractProgress((prev) => ({ ...prev, isRunning: false }));
+      stopRunning();
       console.error(err);
     }
-  }, []);
+  }, [extractImgDataRef, start, update, stopRunning, createUrl]);
 
   // --- 抽出: ダウンロード処理 ---
   const downloadExtractedFile = useCallback(() => {
     if (!extractedFile) return;
     const link = document.createElement("a");
-    const objectUrl = URL.createObjectURL(extractedFile.blob);
-    extractedObjectUrlsRef.current.push(objectUrl);
+    const objectUrl = createUrl(extractedFile.blob);
     link.href = objectUrl;
     link.download = `${extractedFile.name}.${extractedFile.extension}`;
     link.click();
-  }, [extractedFile]);
+  }, [extractedFile, createUrl]);
 
   return (
     <div className="rounded-xl bg-white p-6 shadow-lg sm:p-8 dark:bg-neutral-800">
