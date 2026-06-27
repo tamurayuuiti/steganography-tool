@@ -39,6 +39,9 @@ function App() {
   const [imageFileName, setImageFileName] = useState<string>("");
   const [originalPreviewSrc, setOriginalPreviewSrc] = useState<string>("");
   const [maxDataBytes, setMaxDataBytes] = useState<number>(0);
+  // 埋め込み元画像の読み込みが完了しているか（imgDataRef.current の有無をレンダーで安全に判定するため）
+  const [isSourceImageLoaded, setIsSourceImageLoaded] =
+    useState<boolean>(false);
 
   // --- 埋め込み対象ファイルの状態 ---
   const [targetFile, setTargetFile] = useState<File | null>(null);
@@ -139,6 +142,7 @@ function App() {
       }
 
       resetResults();
+      setIsSourceImageLoaded(false);
       originalFileNameRef.current = file.name;
       setImageFileName(`選択中: ${file.name}`);
 
@@ -163,6 +167,7 @@ function App() {
 
           setOriginalPreviewSrc(result);
           setMaxDataBytes(calcMaxDataBytes(imgData.width, imgData.height));
+          setIsSourceImageLoaded(true);
         };
         img.src = result;
       };
@@ -180,7 +185,7 @@ function App() {
   // 埋め込み可能容量を超えているかどうか
   const isOverCapacity = targetFile !== null && targetFile.size > maxDataBytes;
   const isEmbedReady =
-    imgDataRef.current !== null && targetFile !== null && !isOverCapacity;
+    isSourceImageLoaded && targetFile !== null && !isOverCapacity;
 
   // --- 埋め込み実行処理 ---
   const startEmbedding = useCallback(async () => {
@@ -336,6 +341,35 @@ function App() {
 
       setExtractedFile(result);
       setExtractProgress((prev) => ({ ...prev, isRunning: false }));
+
+      // 抽出結果の形式に応じたプレビュー（画像/音声URL・テキスト内容・画像寸法）を生成する
+      const kind = getPreviewKind(result.extension);
+
+      if (kind === "image" || kind === "audio") {
+        const objectUrl = URL.createObjectURL(result.blob);
+        extractedObjectUrlsRef.current.push(objectUrl);
+        setExtractedPreviewUrl(objectUrl);
+
+        if (kind === "image") {
+          const img = new Image();
+          img.onload = () => {
+            const megaPixels = ((img.width * img.height) / 1_000_000).toFixed(
+              2,
+            );
+            setExtractedImageDimensions(
+              `${img.width}x${img.height} ピクセル (${megaPixels} MP)`,
+            );
+          };
+          img.src = objectUrl;
+        }
+      } else if (kind === "text") {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target?.result;
+          if (typeof text === "string") setExtractedTextPreview(text);
+        };
+        reader.readAsText(result.blob);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setExtractError(message);
@@ -343,41 +377,6 @@ function App() {
       console.error(err);
     }
   }, []);
-
-  // 抽出結果が確定したら、形式に応じたプレビュー（画像/音声URL・テキスト内容・画像寸法）を生成する
-  useEffect(() => {
-    if (!extractedFile) {
-      setExtractedPreviewUrl("");
-      setExtractedTextPreview("");
-      return;
-    }
-
-    const kind = getPreviewKind(extractedFile.extension);
-
-    if (kind === "image" || kind === "audio") {
-      const objectUrl = URL.createObjectURL(extractedFile.blob);
-      extractedObjectUrlsRef.current.push(objectUrl);
-      setExtractedPreviewUrl(objectUrl);
-
-      if (kind === "image") {
-        const img = new Image();
-        img.onload = () => {
-          const megaPixels = ((img.width * img.height) / 1_000_000).toFixed(2);
-          setExtractedImageDimensions(
-            `${img.width}x${img.height} ピクセル (${megaPixels} MP)`,
-          );
-        };
-        img.src = objectUrl;
-      }
-    } else if (kind === "text") {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const result = e.target?.result;
-        if (typeof result === "string") setExtractedTextPreview(result);
-      };
-      reader.readAsText(extractedFile.blob);
-    }
-  }, [extractedFile]);
 
   // --- 抽出: ダウンロード処理 ---
   const downloadExtractedFile = useCallback(() => {
@@ -400,37 +399,6 @@ function App() {
     setModalSrc("");
   }, []);
 
-  // --- ドラッグ&ドロップ共通ハンドラ生成 ---
-  const makeDropHandlers = (
-    setDragging: (v: boolean) => void,
-    handler: (file: File) => void,
-  ) => ({
-    onDragOver: (e: React.DragEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      setDragging(true);
-    },
-    onDragLeave: () => setDragging(false),
-    onDrop: (e: React.DragEvent<HTMLDivElement>) => {
-      e.preventDefault();
-      setDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file) handler(file);
-    },
-  });
-
-  const imageDropHandlers = makeDropHandlers(
-    setIsDraggingImage,
-    handleImageUpload,
-  );
-  const fileDropHandlers = makeDropHandlers(
-    setIsDraggingFile,
-    handleFileUpload,
-  );
-  const extractImageDropHandlers = makeDropHandlers(
-    setIsDraggingExtractImage,
-    handleExtractImageUpload,
-  );
-
   // 容量情報は画像読み込み後のみ表示する
   const showCapacityInfo = maxDataBytes > 0;
 
@@ -444,7 +412,17 @@ function App() {
 
           {/* 画像ドロップエリア */}
           <div
-            {...imageDropHandlers}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingImage(true);
+            }}
+            onDragLeave={() => setIsDraggingImage(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingImage(false);
+              const file = e.dataTransfer.files[0];
+              if (file) handleImageUpload(file);
+            }}
             onClick={() => imageInputRef.current?.click()}
             className={`mb-5 cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
               isDraggingImage
@@ -480,7 +458,17 @@ function App() {
 
           {/* 隠したいファイルのドロップエリア */}
           <div
-            {...fileDropHandlers}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingFile(true);
+            }}
+            onDragLeave={() => setIsDraggingFile(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingFile(false);
+              const file = e.dataTransfer.files[0];
+              if (file) handleFileUpload(file);
+            }}
             onClick={() => fileInputRef.current?.click()}
             className={`mb-5 cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
               isDraggingFile
@@ -643,7 +631,17 @@ function App() {
 
           {/* 抽出用画像ドロップエリア */}
           <div
-            {...extractImageDropHandlers}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingExtractImage(true);
+            }}
+            onDragLeave={() => setIsDraggingExtractImage(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingExtractImage(false);
+              const file = e.dataTransfer.files[0];
+              if (file) handleExtractImageUpload(file);
+            }}
             onClick={() => extractImageInputRef.current?.click()}
             className={`mb-5 cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
               isDraggingExtractImage
