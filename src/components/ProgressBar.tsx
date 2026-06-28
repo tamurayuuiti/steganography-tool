@@ -1,4 +1,5 @@
 import type { ProgressState } from "../types";
+import { Spinner } from "./ui";
 
 interface ProgressBarProps {
   progress: ProgressState;
@@ -10,30 +11,43 @@ interface ProgressBarProps {
 function ProgressBar({ progress, elapsedTime }: ProgressBarProps) {
   if (!progress.visible) return null;
 
+  const pct = Math.min(progress.percent, 100);
+  const isDone = !progress.isRunning && pct >= 100;
+
   return (
-    <>
-      <div className="mt-4 flex items-center">
+    <div className="mt-4 rounded-xl bg-plate-50 p-4 dark:bg-plate-800/60">
+      <div className="flex items-center text-sm">
         {progress.isRunning && (
-          <span className="mr-2.5 inline-block h-5 w-5 animate-spin rounded-full border-4 border-black/10 border-l-emerald-500 align-middle dark:border-white/10 dark:border-l-emerald-500" />
+          <Spinner className="mr-2 text-amber-500" />
         )}
-        <span className="font-bold">{progress.message}</span>
+        <span
+          className={`font-medium ${
+            isDone
+              ? "text-teal-700 dark:text-teal-400"
+              : "text-plate-700 dark:text-plate-200"
+          }`}
+        >
+          {progress.message}
+        </span>
         {elapsedTime !== undefined && (
-          <span className="ml-auto font-mono">{elapsedTime}</span>
+          <span className="ml-auto font-mono text-xs text-plate-500 dark:text-plate-400">
+            {elapsedTime}
+          </span>
         )}
       </div>
 
-      <div className="relative mt-5 h-6 w-full overflow-hidden rounded-full bg-neutral-300 dark:bg-neutral-600">
+      <div className="relative mt-3 h-2 w-full overflow-hidden rounded-full bg-plate-200 dark:bg-plate-700">
         <div
-          className="h-full bg-emerald-500 transition-[width] duration-100 ease-linear"
-          style={{
-            width: `${Math.min(progress.percent, 100).toFixed(1)}%`,
-          }}
+          className={`h-full rounded-full transition-[width] duration-150 ease-out ${
+            isDone ? "bg-teal-500" : "bg-amber-500"
+          }`}
+          style={{ width: `${pct.toFixed(1)}%` }}
         />
-        <span className="absolute top-0 left-1/2 -translate-x-1/2 text-xs leading-6 font-bold text-white [text-shadow:0_0_2px_rgba(0,0,0,0.5)]">
-          {Math.min(progress.percent, 100).toFixed(1)}%
-        </span>
       </div>
-    </>
+      <div className="mt-1.5 text-right text-xs font-mono text-plate-500 dark:text-plate-400">
+        {pct.toFixed(1)}%
+      </div>
+    </div>
   );
 }
 

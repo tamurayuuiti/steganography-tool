@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   calcMaxDataBytes,
   ensureCapacity,
@@ -14,6 +14,7 @@ import { useStopwatch } from "../hooks/useStopwatch";
 import type { PreviewClickHandler, TargetFileInfo } from "../types";
 import FileDropZone from "./FileDropZone";
 import ProgressBar from "./ProgressBar";
+import { Alert, Badge, Button, Card, SectionLabel, StepDots } from "./ui";
 
 interface EmbedCardProps {
   /** プレビュー画像クリック時に拡大モーダルを開く */
@@ -21,9 +22,9 @@ interface EmbedCardProps {
 }
 
 /**
- * 「画像にファイルを埋め込む」カード。
- * 画像・対象ファイルのアップロードから埋め込み実行、進捗表示、
- * 結果プレビュー・ダウンロードまでの一連の責務を持つ。
+ * 「隠す」フロー。画像選択 → 対象ファイル選択 → 実行 → 結果、という
+ * 自然な3ステップで進行する。各ステップの達成状況に応じて
+ * 次のステップの強調表示・StepDotsが進む。
  */
 function EmbedCard({ onPreviewClick }: EmbedCardProps) {
   // --- 画像関連の状態 ---
@@ -84,21 +85,36 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
 
   // --- 埋め込み対象ファイルのアップロード処理 ---
   const handleFileUpload = useCallback((file: File) => {
+    resetResults();
     setTargetFile(file);
     setTargetFileInfo({ name: file.name, size: file.size, type: file.type });
-  }, []);
+  }, [resetResults]);
 
   // 埋め込み可能容量を超えているかどうか
   const isOverCapacity = targetFile !== null && targetFile.size > maxDataBytes;
   const isEmbedReady =
     isSourceImageLoaded && targetFile !== null && !isOverCapacity;
 
+  // 現在の到達ステップ（StepDots表示用）: 1=画像待ち 2=ファイル待ち 3=実行可能/完了
+  const currentStep = useMemo(() => {
+    if (outputPreviewSrc) return 3;
+    if (isSourceImageLoaded && targetFile) return 2;
+    if (isSourceImageLoaded) return 1;
+    return 0;
+  }, [isSourceImageLoaded, targetFile, outputPreviewSrc]);
+
+  // 容量使用率（メーター表示用、0-100にクランプ）
+  const capacityUsagePercent =
+    maxDataBytes > 0 && targetFile
+      ? Math.min((targetFile.size / maxDataBytes) * 100, 100)
+      : 0;
+
   // --- 埋め込み実行処理 ---
   const startEmbedding = useCallback(async () => {
     const imgData = imgDataRef.current;
     if (!imgData || !targetFile) return;
 
-    start("データ埋め込み中...");
+    start("データを埋め込んでいます...");
     setErrorMessage("");
     startStopwatch();
 
@@ -122,12 +138,12 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
       await embed(imgData.data, fileNameBytes, fileBytes, updatePercent);
 
       // 4. 検証 (埋め込んだデータを読み出して比較)
-      updateMessage("データ検証中...");
+      updateMessage("正しく埋め込まれたか検証しています...");
       await verify(imgData.data, fileNameBytes, fileBytes, updatePercent);
 
       // 5. 完了処理
       stopStopwatch();
-      finish("完了");
+      finish("埋め込みが完了しました");
 
       // 結果をCanvasに反映してプレビュー表示
       const canvas = canvasRef.current;
@@ -166,151 +182,180 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
     link.click();
   }, [outputPreviewSrc]);
 
-  // 容量情報は画像読み込み後のみ表示する
-  const showCapacityInfo = maxDataBytes > 0;
-
   return (
-    <div className="rounded-xl bg-white p-6 shadow-lg sm:p-8 dark:bg-neutral-800">
-      <h3 className="mb-4 inline-block border-b-2 border-emerald-500 pb-1 text-xl font-semibold">
-        画像にファイルを埋め込む
-      </h3>
+    <Card className="p-6 sm:p-8">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-plate-900 dark:text-white">
+            画像にファイルを隠す
+          </h2>
+          <p className="mt-0.5 text-sm text-plate-500 dark:text-plate-400">
+            画像を選び、隠したいファイルを重ねます
+          </p>
+        </div>
+        <StepDots total={3} current={currentStep} />
+      </div>
 
-      {/* 画像ドロップエリア */}
-      <FileDropZone
-        description={
-          <p className="pointer-events-none mb-2 text-neutral-600 dark:text-neutral-400">
-            1. ここに画像 (PNG/JPG) をドラッグ＆ドロップ
-          </p>
-        }
-        selectLabel="画像を選択"
-        accept="image/png, image/jpeg, image/heif"
-        onFileSelect={handleImageUpload}
-        inputRef={imageInputRef}
-      >
-        {imageFileName && (
-          <p className="pointer-events-none mt-2 text-sm text-neutral-600 dark:text-neutral-400">
-            {imageFileName}
-          </p>
-        )}
-      </FileDropZone>
-
-      {/* 隠したいファイルのドロップエリア */}
-      <FileDropZone
-        description={
-          <p className="pointer-events-none mb-2 text-neutral-600 dark:text-neutral-400">
-            2. ここに隠したいファイルをドラッグ＆ドロップ
-          </p>
-        }
-        selectLabel="ファイルを選択"
-        onFileSelect={handleFileUpload}
-        inputRef={fileInputRef}
-      >
-        {targetFileInfo && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2.5 rounded-lg bg-neutral-500/5 p-4 text-left text-sm"
+      <div className="space-y-5">
+        {/* ステップ1: 画像 */}
+        <section>
+          <SectionLabel index={1}>もとになる画像</SectionLabel>
+          <FileDropZone
+            title={
+              isSourceImageLoaded
+                ? "別の画像に変更する"
+                : "画像をドラッグ＆ドロップ"
+            }
+            hint="PNG・JPG・HEIF に対応"
+            selectLabel="画像を選択"
+            accept="image/png, image/jpeg, image/heif"
+            onFileSelect={handleImageUpload}
+            inputRef={imageInputRef}
+            isFilled={isSourceImageLoaded}
           >
-            <div>
-              <strong className="text-neutral-800 dark:text-neutral-200">
-                ファイル名:
-              </strong>{" "}
-              {targetFileInfo.name}
-            </div>
-            <div>
-              <strong className="text-neutral-800 dark:text-neutral-200">
-                サイズ:
-              </strong>{" "}
-              {formatBytes(targetFileInfo.size)}
-            </div>
-            <div>
-              <strong className="text-neutral-800 dark:text-neutral-200">
-                形式:
-              </strong>{" "}
-              {targetFileInfo.type || "不明"}
-            </div>
-          </div>
-        )}
-      </FileDropZone>
-
-      {/* アクションエリア */}
-      <div>
-        {showCapacityInfo && (
-          <p className="my-2 text-neutral-600 dark:text-neutral-400">
-            埋め込み可能容量:{" "}
-            <strong className="text-emerald-500">
-              {formatBytes(maxDataBytes)}
-            </strong>{" "}
-            (ファイル: {targetFile ? formatBytes(targetFile.size) : "0 B"})
-            {isOverCapacity && (
-              <>
-                <br />
-                <span className="font-bold text-red-500">
-                  ⚠ 容量オーバーです。より大きな画像を使用してください。
-                </span>
-              </>
+            {imageFileName && (
+              <p className="pointer-events-none mt-3 text-xs font-medium text-plate-600 dark:text-plate-300">
+                {imageFileName.replace("選択中: ", "")}
+              </p>
             )}
-          </p>
-        )}
+          </FileDropZone>
+        </section>
 
-        <button
-          type="button"
-          disabled={!isEmbedReady || progress.isRunning}
-          onClick={startEmbedding}
-          className="mt-2 mr-2.5 rounded-md bg-emerald-500 px-6 py-3 text-base text-white transition-colors hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-neutral-300 disabled:hover:bg-neutral-300"
+        {/* ステップ2: 対象ファイル */}
+        <section
+          className={
+            isSourceImageLoaded ? "" : "pointer-events-none opacity-40"
+          }
         >
-          データを埋め込む
-        </button>
-        {outputPreviewSrc && (
-          <button
-            type="button"
-            onClick={downloadImage}
-            className="mt-2 mr-2.5 rounded-md bg-emerald-500 px-6 py-3 text-base text-white transition-colors hover:bg-emerald-600"
+          <SectionLabel index={2}>隠したいファイル</SectionLabel>
+          <FileDropZone
+            title={targetFile ? "別のファイルに変更する" : "ファイルをドラッグ＆ドロップ"}
+            hint="どの形式のファイルでも隠せます"
+            selectLabel="ファイルを選択"
+            onFileSelect={handleFileUpload}
+            inputRef={fileInputRef}
+            isFilled={targetFile !== null}
           >
-            画像をダウンロード
-          </button>
-        )}
-      </div>
+            {targetFileInfo && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="mt-4 flex flex-wrap items-center justify-center gap-2 text-left text-xs"
+              >
+                <Badge>{targetFileInfo.name}</Badge>
+                <Badge>{formatBytes(targetFileInfo.size)}</Badge>
+                <Badge>{targetFileInfo.type || "形式不明"}</Badge>
+              </div>
+            )}
+          </FileDropZone>
 
-      {/* 進捗セクション */}
-      <div>
-        <ProgressBar progress={progress} elapsedTime={elapsedTime} />
+          {/* 容量メーター */}
+          {maxDataBytes > 0 && targetFile && (
+            <div className="mt-3 rounded-lg bg-plate-50 px-3.5 py-3 dark:bg-plate-800/60">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-plate-600 dark:text-plate-400">
+                  容量使用率
+                </span>
+                <span
+                  className={`font-mono font-medium ${
+                    isOverCapacity
+                      ? "text-rose-600 dark:text-rose-400"
+                      : "text-plate-700 dark:text-plate-300"
+                  }`}
+                >
+                  {formatBytes(targetFile.size)} / {formatBytes(maxDataBytes)}
+                </span>
+              </div>
+              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-plate-200 dark:bg-plate-700">
+                <div
+                  className={`h-full rounded-full transition-all ${
+                    isOverCapacity ? "bg-rose-500" : "bg-amber-500"
+                  }`}
+                  style={{ width: `${capacityUsagePercent}%` }}
+                />
+              </div>
+            </div>
+          )}
 
-        {errorMessage && (
-          <div className="mt-2.5 font-bold text-red-500">{errorMessage}</div>
-        )}
-      </div>
+          {isOverCapacity && (
+            <div className="mt-2.5">
+              <Alert tone="rose">
+                容量オーバーです。より大きな画像を使用するか、ファイルを圧縮してください。
+              </Alert>
+            </div>
+          )}
+        </section>
 
-      {/* プレビューセクション */}
-      <div className="mt-8 flex flex-wrap justify-around gap-5">
-        {originalPreviewSrc && (
-          <div className="min-w-65 flex-1 rounded-lg border border-neutral-300 p-2.5 text-center dark:border-neutral-600">
-            <p className="text-neutral-600 dark:text-neutral-400">元画像</p>
-            <img
-              src={originalPreviewSrc}
-              onClick={() => onPreviewClick(originalPreviewSrc)}
-              alt="元画像のプレビュー"
-              className="mt-2.5 max-h-75 max-w-full cursor-zoom-in rounded bg-neutral-500 object-contain"
-            />
-          </div>
-        )}
-        {outputPreviewSrc && (
-          <div className="min-w-65 flex-1 rounded-lg border border-neutral-300 p-2.5 text-center dark:border-neutral-600">
-            <p className="text-neutral-600 dark:text-neutral-400">
-              埋め込み後
-            </p>
-            <img
-              src={outputPreviewSrc}
-              onClick={() => onPreviewClick(outputPreviewSrc)}
-              alt="埋め込み後画像のプレビュー"
-              className="mt-2.5 max-h-75 max-w-full cursor-zoom-in rounded bg-neutral-500 object-contain"
-            />
-          </div>
+        {/* ステップ3: 実行・結果 */}
+        <section className="border-t border-plate-100 pt-5 dark:border-plate-700">
+          <Button
+            size="lg"
+            disabled={!isEmbedReady || progress.isRunning}
+            onClick={startEmbedding}
+            className="w-full"
+          >
+            {progress.isRunning ? "処理中..." : "データを埋め込む"}
+          </Button>
+
+          <ProgressBar progress={progress} elapsedTime={elapsedTime} />
+
+          {errorMessage && (
+            <div className="mt-3">
+              <Alert tone="rose">{errorMessage}</Alert>
+            </div>
+          )}
+
+          {outputPreviewSrc && (
+            <div className="mt-3">
+              <Alert tone="teal">
+                埋め込みと検証が完了しました。画像を保存できます。
+              </Alert>
+            </div>
+          )}
+        </section>
+
+        {/* プレビューセクション */}
+        {(originalPreviewSrc || outputPreviewSrc) && (
+          <section className="grid gap-4 sm:grid-cols-2">
+            {originalPreviewSrc && (
+              <div className="rounded-xl border border-plate-200 p-3 text-center dark:border-plate-700">
+                <p className="text-xs font-medium text-plate-500 dark:text-plate-400">
+                  元画像
+                </p>
+                <img
+                  src={originalPreviewSrc}
+                  onClick={() => onPreviewClick(originalPreviewSrc)}
+                  alt="元画像のプレビュー"
+                  className="mt-2 max-h-56 w-full cursor-zoom-in rounded-lg bg-plate-100 object-contain dark:bg-plate-800"
+                />
+              </div>
+            )}
+            {outputPreviewSrc && (
+              <div className="rounded-xl border border-amber-300/60 bg-amber-500/5 p-3 text-center dark:border-amber-500/30">
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  埋め込み後
+                </p>
+                <img
+                  src={outputPreviewSrc}
+                  onClick={() => onPreviewClick(outputPreviewSrc)}
+                  alt="埋め込み後画像のプレビュー"
+                  className="mt-2 max-h-56 w-full cursor-zoom-in rounded-lg bg-plate-100 object-contain dark:bg-plate-800"
+                />
+                <Button
+                  variant="secondary"
+                  onClick={downloadImage}
+                  className="mt-3 w-full"
+                >
+                  画像をダウンロード
+                </Button>
+              </div>
+            )}
+          </section>
         )}
       </div>
 
       {/* 画像処理用の非表示Canvas */}
       <canvas ref={canvasRef} className="hidden" />
-    </div>
+    </Card>
   );
 }
 

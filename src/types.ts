@@ -43,3 +43,16 @@ export interface TargetFileInfo {
  * EmbedCard・ExtractCardの両方からAppへ共有される。
  */
 export type PreviewClickHandler = (src: string) => void;
+
+/**
+ * 「隠す」「見つける」の2モード。
+ * 今回のUI再設計でタブ切り替え式の画面構成を採用するために導入。
+ */
+export type AppMode = "hide" | "reveal";
+
+/**
+ * 各モード内の操作ステップ。
+ * 画像選択 → (対象選択/実行) → 結果確認、という流れを
+ * StepDotsやステップラベルで可視化するために使用する。
+ */
+export type FlowStep = 1 | 2 | 3;

@@ -1,5 +1,38 @@
 @import "tailwindcss";
 
+/*
+ * デザイントークン定義（Tailwind v4 の @theme）。
+ *
+ * "plate"  : 写真の印画紙・乾板を思わせる藍〜グレーのベースカラー。
+ * "amber"  : 現像液の琥珀色。実行・進捗・強調のための単一アクセント。
+ * teal/rose: 成功・エラーの信号色（既存のUIライブラリ慣習に合わせ最小限の使用に留める）。
+ */
+@theme {
+  --color-plate-50: #f7f8fa;
+  --color-plate-100: #eef0f4;
+  --color-plate-200: #dde1e8;
+  --color-plate-300: #c2c9d6;
+  --color-plate-400: #98a3b8;
+  --color-plate-500: #717d96;
+  --color-plate-600: #545f78;
+  --color-plate-700: #3d465c;
+  --color-plate-800: #2a3142;
+  --color-plate-850: #232936;
+  --color-plate-900: #1a1f2b;
+  --color-plate-950: #11141d;
+
+  --color-amber-400: #f2b35a;
+  --color-amber-500: #e6982e;
+  --color-amber-600: #c97c1d;
+
+  --color-teal-500: #2da888;
+  --color-teal-600: #21896d;
+  --color-teal-700: #1c715a;
+
+  --color-rose-500: #e0566a;
+  --color-rose-600: #c43e51;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -12,5 +45,11 @@ body,
 
 body {
   margin: 0;
-  font-family: "Helvetica Neue", Arial, sans-serif;
+  font-family:
+    "Inter",
+    -apple-system,
+    "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP",
+    sans-serif;
 }
