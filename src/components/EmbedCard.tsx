@@ -6,6 +6,7 @@ import {
   verify,
   formatBytes,
   isValidImage,
+  encodeUtf8,
 } from "../steganography";
 import { useImageSource } from "../hooks/useImageSource";
 import { useProgress } from "../hooks/useProgress";
@@ -108,7 +109,7 @@ function EmbedCard({ onPreviewClick }: EmbedCardProps) {
 
       // 2. メタデータの作成
       // 構造: [NameLen(16bit)][NameBytes][DataLen(32bit)][DataBytes]
-      const fileNameBytes = new TextEncoder().encode(targetFile.name);
+      const fileNameBytes = encodeUtf8(targetFile.name);
 
       ensureCapacity(
         imgData.width,

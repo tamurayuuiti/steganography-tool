@@ -4,31 +4,73 @@
  * 画像のピクセルデータ（RGBA）の最下位ビットにファイルデータを埋め込む。
  * Alphaチャンネル（4バイトごとの4番目）は画像の透明度を崩さないようスキップする。
  *
- * データ構造: [ファイル名長(16bit)][ファイル名][データ長(32bit)][データ本体]
+ * --- データフォーマット仕様（正式版） ---
+ * 埋め込み・抽出・検証はすべて以下の単一フォーマットに従う。
+ * 拡張子は File.name に含まれるため、専用フィールドは持たない。
+ *
+ *   [NameLen (uint16)] [Name (UTF-8)] [DataLen (uint32)] [Data]
+ *
+ * 旧仕様（抽出側のみ ExtLen/Ext フィールドを持つ6フィールド構造）は廃止済み。
+ * フォーマットの定数（ビット数・チャンネル数等）は utils/bitIO.ts の STEGO_FORMAT に一元化されている。
  */
 
 import type { ExtractedFile, PreviewKind, ProgressCallback } from "./types";
+import {
+  BitReader,
+  BitWriter,
+  decodeUtf8,
+  encodeUtf8,
+  STEGO_FORMAT,
+} from "./utils/bitIO";
 
 export const CONFIG = {
   /** UIフリーズを防ぐための処理単位（バイト数） */
   chunkSize: 50000,
-  /** ヘッダー用予約バイト（概算） */
-  headerBytes: 200,
+  /** 抽出処理のチャンクサイズ（ピクセル単位、元の抽出ツール仕様に合わせる） */
+  extractChunkSize: 1000,
   validImageTypes: ["image/png", "image/jpeg", "image/heif"],
   validImageExts: ["png", "jpg", "jpeg", "heif"],
 } as const;
 
 /**
- * 埋め込み可能な最大バイト数を計算する。
- * ピクセル数 * 3チャンネル(RGB) * 1bit / 8bit = バイト数。そこからヘッダー分を引く。
+ * ヘッダー（ファイル名長＋ファイル名＋データ長）に必要な合計ビット数を計算する。
+ * 埋め込み可否判定（calcMaxDataBytes）・厳密検証（ensureCapacity）の両方が
+ * この関数を介して同じ計算式を参照することで、概算と厳密計算の不一致を防ぐ。
  */
-export function calcMaxDataBytes(width: number, height: number): number {
-  const pixelCount = width * height;
-  return Math.floor((pixelCount * 3) / 8) - CONFIG.headerBytes;
+function calcHeaderBits(nameByteLength: number): number {
+  return (
+    STEGO_FORMAT.uint16Bits +
+    nameByteLength * STEGO_FORMAT.bitsPerByte +
+    STEGO_FORMAT.uint32Bits
+  );
 }
 
 /**
- * 必要な合計ビット数が画像の埋め込み可能ビット数を超えていないか検証する。
+ * 画像が埋め込みに利用できる総ビット数を計算する。
+ * ピクセル数 × 埋め込み可能チャンネル数（RGB）= 利用可能ビット数。
+ */
+function calcEmbeddableBits(width: number, height: number): number {
+  return width * height * STEGO_FORMAT.embeddableChannelsPerPixel;
+}
+
+/**
+ * 埋め込み可能な最大データバイト数を計算する（UI表示用）。
+ *
+ * ファイル名が確定していない画像読み込み直後の時点でも目安を表示できるよう、
+ * 最小ヘッダー（ファイル名長0バイト相当）を基準に算出する。
+ * 実際の埋め込み可否は、ファイル名確定後に ensureCapacity による厳密判定で最終確認する。
+ * いずれも calcHeaderBits / calcEmbeddableBits を共通利用しており、計算式自体は完全に一致する。
+ */
+export function calcMaxDataBytes(width: number, height: number): number {
+  const embeddableBits = calcEmbeddableBits(width, height);
+  const minHeaderBits = calcHeaderBits(0);
+  return Math.floor(
+    (embeddableBits - minHeaderBits) / STEGO_FORMAT.bitsPerByte,
+  );
+}
+
+/**
+ * 必要な合計ビット数が画像の埋め込み可能ビット数を超えていないか検証する（厳密判定）。
  */
 export function ensureCapacity(
   width: number,
@@ -36,8 +78,9 @@ export function ensureCapacity(
   nameLength: number,
   dataLength: number,
 ): void {
-  const totalBitsNeeded = 16 + nameLength * 8 + 32 + dataLength * 8;
-  const maxBits = width * height * 3;
+  const totalBitsNeeded =
+    calcHeaderBits(nameLength) + dataLength * STEGO_FORMAT.bitsPerByte;
+  const maxBits = calcEmbeddableBits(width, height);
   if (totalBitsNeeded > maxBits) {
     throw new Error("容量不足です");
   }
@@ -46,6 +89,8 @@ export function ensureCapacity(
 /**
  * ビット埋め込み処理（分割実行版）。
  * pixelData を直接書き換える（Uint8ClampedArray を破壊的に更新）。
+ *
+ * フォーマット: [NameLen(16bit)][NameBytes][DataLen(32bit)][DataBytes]
  */
 export async function embed(
   pixelData: Uint8ClampedArray,
@@ -53,32 +98,12 @@ export async function embed(
   fileBytes: Uint8Array,
   onProgress: ProgressCallback,
 ): Promise<void> {
-  let pixelIndex = 0;
-
-  // Helper: 数値を指定ビット数で埋め込む
-  const writeBits = (value: number, bitCount: number): void => {
-    for (let i = bitCount - 1; i >= 0; i--) {
-      const bit = (value >> i) & 1;
-      // Alphaチャンネル(3, 7, 11...)はスキップ
-      if ((pixelIndex + 1) % 4 === 0) pixelIndex++;
-
-      // LSBを書き換え
-      pixelData[pixelIndex] = (pixelData[pixelIndex] & 0xfe) | bit;
-      pixelIndex++;
-    }
-  };
-
-  // Helper: バイト配列を埋め込む
-  const writeByteArray = (bytes: Uint8Array): void => {
-    for (let i = 0; i < bytes.length; i++) {
-      writeBits(bytes[i], 8);
-    }
-  };
+  const writer = new BitWriter(pixelData);
 
   // --- ヘッダー書き込み ---
-  writeBits(nameBytes.length, 16); // ファイル名長
-  writeByteArray(nameBytes); // ファイル名
-  writeBits(fileBytes.length, 32); // データ長
+  writer.writeUint16(nameBytes.length); // ファイル名長
+  writer.writeBytes(nameBytes); // ファイル名
+  writer.writeUint32(fileBytes.length); // データ長
 
   // --- データ本体書き込み (分割実行) ---
   const totalBytes = fileBytes.length;
@@ -87,16 +112,8 @@ export async function embed(
   while (processedBytes < totalBytes) {
     const chunkEnd = Math.min(processedBytes + CONFIG.chunkSize, totalBytes);
 
-    // チャンク処理
     for (let i = processedBytes; i < chunkEnd; i++) {
-      const byte = fileBytes[i];
-      // 8ビット展開して書き込み (最適化: ループ展開しても良いが可読性重視)
-      for (let bitPos = 7; bitPos >= 0; bitPos--) {
-        if ((pixelIndex + 1) % 4 === 0) pixelIndex++;
-        pixelData[pixelIndex] =
-          (pixelData[pixelIndex] & 0xfe) | ((byte >> bitPos) & 1);
-        pixelIndex++;
-      }
+      writer.writeByte(fileBytes[i]);
     }
 
     processedBytes = chunkEnd;
@@ -113,6 +130,8 @@ export async function embed(
 /**
  * 検証処理（分割実行版）。
  * 埋め込んだデータを読み出し、元データと一致するか確認する。不一致なら例外を投げる。
+ *
+ * フォーマット: [NameLen(16bit)][NameBytes][DataLen(32bit)][DataBytes]
  */
 export async function verify(
   pixelData: Uint8ClampedArray,
@@ -120,34 +139,22 @@ export async function verify(
   originalFileBytes: Uint8Array,
   onProgress: ProgressCallback,
 ): Promise<void> {
-  let pixelIndex = 0;
-
-  // Helper: ビットを読み出して数値を復元
-  const readBits = (bitCount: number): number => {
-    let value = 0;
-    for (let i = 0; i < bitCount; i++) {
-      if ((pixelIndex + 1) % 4 === 0) pixelIndex++;
-      const bit = pixelData[pixelIndex] & 1;
-      value = (value << 1) | bit;
-      pixelIndex++;
-    }
-    return value;
-  };
+  const reader = new BitReader(pixelData);
 
   // 1. ファイル名長の検証
-  const nameLen = readBits(16);
+  const nameLen = reader.readUint16();
   if (nameLen !== originalNameBytes.length)
     throw new Error("検証エラー: ファイル名長が不一致");
 
   // 2. ファイル名の検証
   for (let i = 0; i < nameLen; i++) {
-    const charCode = readBits(8);
+    const charCode = reader.readByte();
     if (charCode !== originalNameBytes[i])
       throw new Error("検証エラー: ファイル名が不一致");
   }
 
   // 3. データ長の検証
-  const dataLen = readBits(32);
+  const dataLen = reader.readUint32();
   if (dataLen !== originalFileBytes.length)
     throw new Error("検証エラー: データサイズが不一致");
 
@@ -157,12 +164,7 @@ export async function verify(
     const chunkEnd = Math.min(processedBytes + CONFIG.chunkSize, dataLen);
 
     for (let i = processedBytes; i < chunkEnd; i++) {
-      let byte = 0;
-      for (let bit = 0; bit < 8; bit++) {
-        if ((pixelIndex + 1) % 4 === 0) pixelIndex++;
-        byte = (byte << 1) | (pixelData[pixelIndex] & 1);
-        pixelIndex++;
-      }
+      const byte = reader.readByte();
       if (byte !== originalFileBytes[i]) {
         throw new Error(`検証エラー: バイト不一致 (位置: ${i})`);
       }
@@ -205,66 +207,61 @@ export function isValidImage(file: File): boolean {
 }
 
 /**
- * 抽出処理のチャンクサイズ（ピクセル単位、元の抽出ツール仕様に合わせる）。
+ * フルファイル名（例: "photo.png"）を「名前」と「拡張子」に分割する。
+ * ドットが先頭以外に無い場合は拡張子なしとして扱う（隠しファイル等の先頭ドットは無視）。
+ *
+ * データフォーマット上、ファイル名は拡張子を含む単一フィールドとして埋め込まれるため、
+ * 抽出後にこの関数で ExtractedFile の name/extension に分割する。
  */
-const EXTRACT_CHUNK_SIZE = 1000;
+function splitFileName(fullName: string): {
+  name: string;
+  extension: string;
+} {
+  const lastDotIndex = fullName.lastIndexOf(".");
+  if (lastDotIndex <= 0) {
+    return { name: fullName, extension: "" };
+  }
+  return {
+    name: fullName.slice(0, lastDotIndex),
+    extension: fullName.slice(lastDotIndex + 1),
+  };
+}
 
 /**
  * 抽出処理（分割実行版）。
  *
- * 注意: 抽出側のデータ構造は埋め込み側（embed/verify）と異なり、
- * [NameLen(16bit)][NameBytes][DataLen(32bit)][ExtLen(8bit)][ExtBytes][DataBytes] という
- * 拡張子フィールドを含む構造を前提としている。元の単一HTMLアプリの仕様をそのまま維持している。
+ * フォーマット: [NameLen(16bit)][NameBytes][DataLen(32bit)][DataBytes]
+ * 埋め込み・検証と完全に同一のフォーマットを前提とする（旧仕様の拡張子フィールドは廃止）。
+ * 復元したフルファイル名は splitFileName により name/extension に分割して返す。
  */
 export async function extract(
   pixelData: Uint8ClampedArray,
   onProgress: ProgressCallback,
 ): Promise<ExtractedFile> {
-  let pixelIndex = 0;
-
-  // Helper: ビットを読み出して数値を復元（Alphaチャンネルをスキップ）
-  const readBits = (bitCount: number): number => {
-    let value = 0;
-    for (let i = 0; i < bitCount; i++) {
-      const bit = pixelData[pixelIndex] & 1;
-      value = (value << 1) | bit;
-      pixelIndex += 1;
-      if ((pixelIndex + 1) % 4 === 0) pixelIndex += 1;
-    }
-    return value;
-  };
+  const reader = new BitReader(pixelData);
 
   // 1. ファイル名長の抽出（16ビット）
-  const fileNameLength = readBits(16);
+  const fileNameLength = reader.readUint16();
 
   // 2. ファイル名の抽出
-  const fileNameBytes = new Uint8Array(fileNameLength);
-  for (let i = 0; i < fileNameLength; i++) {
-    fileNameBytes[i] = readBits(8);
-  }
-  const fileName = new TextDecoder().decode(fileNameBytes);
+  const fileNameBytes = reader.readBytes(fileNameLength);
+  const fullFileName = decodeUtf8(fileNameBytes);
 
   // 3. データ長の抽出（32ビット）
-  const dataLength = readBits(32);
+  const dataLength = reader.readUint32();
 
-  // 4. 拡張子長の抽出（8ビット）
-  const extLength = readBits(8);
-
-  // 5. ファイル拡張子の抽出
-  let fileExtension = "";
-  for (let i = 0; i < extLength; i++) {
-    fileExtension += String.fromCharCode(readBits(8));
-  }
-
-  // 6. データ本体の抽出（チャンク分割実行）
+  // 4. データ本体の抽出（チャンク分割実行）
   const binaryData = new Uint8Array(dataLength);
   let processedBytes = 0;
 
   while (processedBytes < dataLength) {
-    const chunkEnd = Math.min(processedBytes + EXTRACT_CHUNK_SIZE, dataLength);
+    const chunkEnd = Math.min(
+      processedBytes + CONFIG.extractChunkSize,
+      dataLength,
+    );
 
     for (let i = processedBytes; i < chunkEnd; i++) {
-      binaryData[i] = readBits(8);
+      binaryData[i] = reader.readByte();
     }
 
     processedBytes = chunkEnd;
@@ -274,9 +271,11 @@ export async function extract(
     await new Promise((resolve) => requestAnimationFrame(resolve));
   }
 
+  const { name, extension } = splitFileName(fullFileName);
+
   return {
-    name: fileName,
-    extension: fileExtension,
+    name,
+    extension,
     blob: new Blob([binaryData]),
   };
 }
@@ -303,3 +302,5 @@ export function getPreviewKind(extension: string): PreviewKind {
   if (ext === "txt" || ext === "json" || ext === "csv") return "text";
   return "unsupported";
 }
+
+export { encodeUtf8 };
